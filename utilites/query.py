@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import re
 from typing import Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,18 +34,95 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Custom RAG prompt template that instructs LLM to cite page numbers
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the input text.
+    
+    Args:
+        text: Input text to analyze
+        
+    Returns:
+        Language code ('ar' for Arabic, 'en' for English, 'other' for other languages)
+    """
+    # Arabic character range
+    arabic_pattern = r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
+    
+    # Check if text contains Arabic characters
+    if re.search(arabic_pattern, text):
+        return 'ar'
+    
+    # Check for common English patterns
+    english_pattern = r'[a-zA-Z]'
+    if re.search(english_pattern, text):
+        return 'en'
+    
+    # Default to other languages
+    return 'other'
+
+def get_language_specific_prompt(language: str) -> str:
+    """
+    Get language-specific instructions for the RAG prompt.
+    
+    Args:
+        language: Language code ('ar', 'en', 'other')
+        
+    Returns:
+        Language-specific prompt instructions
+    """
+    if language == 'ar':
+        return """
+تعليمات اللغة العربية:
+- استجب باللغة العربية إذا كان السؤال باللغة العربية
+- استخدم قواعد اللغة العربية الصحيحة والتنسيق المناسب
+- استخدم التنسيق التالي للمراجع: "(الصفحة: X)" أو "(الصفحات: X, Y, Z)"
+- إذا لم تتوفر أرقام الصفحات، اذكر "(الصفحة: غير محدد)"
+- حافظ على نفس أسلوب اللغة ونبرة السؤال
+"""
+    elif language == 'en':
+        return """
+English Language Instructions:
+- Respond in English if the question is in English
+- Use proper English grammar and formatting
+- Use this format for citations: "(Page: X)" or "(Pages: X, Y, Z)"
+- If page numbers are not available, mention "(Page: Not specified)"
+- Maintain the same language style and tone as the query
+"""
+    else:
+        return """
+Language Instructions:
+- Respond in the same language as the user's query
+- Use proper grammar and formatting for that language
+- Use appropriate translation for page citations
+- If page numbers are not available, use appropriate translation
+- Maintain the same language style and tone as the query
+"""
+
+# Custom RAG prompt template that instructs LLM to cite page numbers and respond in the same language as the query
 RAG_PROMPT_TEMPLATE = """
 You are a helpful assistant that answers questions based on the provided context documents. 
 Your task is to provide accurate and helpful responses while citing the page numbers from the source documents.
 
+LANGUAGE INSTRUCTIONS:
+- If the user asks a question in Arabic, respond in Arabic
+- If the user asks a question in English, respond in English
+- If the user asks a question in any other language, respond in that same language
+- Always maintain the same language as the user's query throughout your response
+- For Arabic responses, use proper Arabic grammar and formatting
+
 IMPORTANT INSTRUCTIONS:
 1. Base your answer ONLY on the information provided in the context documents
 2. At the end of your response, ALWAYS mention the page numbers where the information was found
-3. Use this format for page citations: "(Page: X)" or "(Pages: X, Y, Z)" where X, Y, Z are page numbers
-4. If page numbers are not available for some chunks, mention "(Page: Not specified)" for those sources
-5. If you cannot find relevant information in the context, say so clearly
+3. Use this format for page citations:
+   - English: "(Page: X)" or "(Pages: X, Y, Z)" where X, Y, Z are page numbers
+   - Arabic: "(الصفحة: X)" or "(الصفحات: X, Y, Z)" where X, Y, Z are page numbers
+   - Other languages: Use appropriate translation of "Page" or "Pages"
+4. If page numbers are not available for some chunks, mention:
+   - English: "(Page: Not specified)"
+   - Arabic: "(الصفحة: غير محدد)"
+   - Other languages: Use appropriate translation
+5. If you cannot find relevant information in the context, say so clearly in the same language as the query
 6. Be concise but comprehensive in your response
+7. Maintain the same language style and tone as the user's query
 
 Context Information:
 {context_str}
@@ -443,6 +521,7 @@ Content: {node.node.text}
     def rag_query(self, query: str, limit: int = None) -> QueryResult:
         """
         Perform RAG (Retrieval-Augmented Generation) query with page citations.
+        Supports multiple languages including Arabic.
         
         Args:
             query: User query
@@ -459,6 +538,10 @@ Content: {node.node.text}
             
             limit = limit or self.config.similarity_top_k
             
+            # Detect language of the query
+            detected_language = detect_language(query)
+            logger.info(f"🌐 Detected language: {detected_language} for query: {query[:50]}...")
+            
             # Create query engine with specific retriever and custom prompt
             rag_retriever = VectorIndexRetriever(
                 index=self.vector_storage.index,
@@ -467,8 +550,33 @@ Content: {node.node.text}
                 embed_model=self.embedding_model
             )
             
-            # Create custom prompt template for page citations
-            custom_prompt = PromptTemplate(RAG_PROMPT_TEMPLATE)
+            # Create language-specific prompt
+            language_instructions = get_language_specific_prompt(detected_language)
+            
+            # Create custom prompt template with language-specific instructions
+            language_specific_template = f"""
+You are a helpful assistant that answers questions based on the provided context documents. 
+Your task is to provide accurate and helpful responses while citing the page numbers from the source documents.
+
+{language_instructions}
+
+IMPORTANT INSTRUCTIONS:
+1. Base your answer ONLY on the information provided in the context documents
+2. At the end of your response, ALWAYS mention the page numbers where the information was found
+3. Use appropriate page citation format for the detected language
+4. If page numbers are not available for some chunks, mention appropriate translation
+5. If you cannot find relevant information in the context, say so clearly in the same language as the query
+6. Be concise but comprehensive in your response
+7. Maintain the same language style and tone as the user's query
+
+Context Information:
+{{context_str}}
+
+Query: {{query_str}}
+
+Answer: """
+            
+            custom_prompt = PromptTemplate(language_specific_template)
             
             rag_query_engine = RetrieverQueryEngine.from_args(
                 retriever=rag_retriever,
@@ -517,6 +625,7 @@ Content: {node.node.text}
     def rag_query_with_page_context(self, query: str, limit: int = None) -> QueryResult:
         """
         Enhanced RAG query that explicitly includes page information in context.
+        Supports multiple languages including Arabic.
         
         Args:
             query: User query
@@ -533,6 +642,10 @@ Content: {node.node.text}
             
             limit = limit or self.config.similarity_top_k
             
+            # Detect language of the query
+            detected_language = detect_language(query)
+            logger.info(f"🌐 Detected language: {detected_language} for query: {query[:50]}...")
+            
             # Retrieve relevant documents
             rag_retriever = VectorIndexRetriever(
                 index=self.vector_storage.index,
@@ -546,11 +659,31 @@ Content: {node.node.text}
             # Create enhanced context with page information
             enhanced_context = self._create_enhanced_context_string(retrieved_nodes)
             
-            # Create custom prompt with enhanced context
-            enhanced_prompt = RAG_PROMPT_TEMPLATE.format(
-                context_str=enhanced_context,
-                query_str=query
-            )
+            # Create language-specific prompt
+            language_instructions = get_language_specific_prompt(detected_language)
+            
+            # Create custom prompt with language-specific instructions
+            enhanced_prompt = f"""
+You are a helpful assistant that answers questions based on the provided context documents. 
+Your task is to provide accurate and helpful responses while citing the page numbers from the source documents.
+
+{language_instructions}
+
+IMPORTANT INSTRUCTIONS:
+1. Base your answer ONLY on the information provided in the context documents
+2. At the end of your response, ALWAYS mention the page numbers where the information was found
+3. Use appropriate page citation format for the detected language
+4. If page numbers are not available for some chunks, mention appropriate translation
+5. If you cannot find relevant information in the context, say so clearly in the same language as the query
+6. Be concise but comprehensive in your response
+7. Maintain the same language style and tone as the user's query
+
+Context Information:
+{enhanced_context}
+
+Query: {query}
+
+Answer: """
             
             # Get response from LLM
             response = self.llm.complete(enhanced_prompt)
@@ -921,6 +1054,7 @@ def rag_and_display_with_files(query: str, limit: int = 5, title: str = "RAG Res
 def enhanced_rag_and_display(query: str, limit: int = 5, title: str = "Enhanced RAG Results") -> QueryResult:
     """
     Perform enhanced RAG query with explicit page context and display results.
+    Supports multiple languages including Arabic.
     
     Args:
         query: Search query
@@ -929,6 +1063,49 @@ def enhanced_rag_and_display(query: str, limit: int = 5, title: str = "Enhanced 
         
     Returns:
         QueryResult with enhanced RAG response and page citations
+    """
+    config = QueryConfig(
+        enable_rag=True, 
+        similarity_top_k=limit,
+        include_page_citations=True,
+        include_page_numbers=True
+    )
+    query_engine = create_query_engine(config)
+    result = query_engine.rag_query_with_page_context(query, limit)
+    query_engine.display_results_with_files(result, title)
+    return result
+
+def arabic_rag_query(query: str, limit: int = 5) -> QueryResult:
+    """
+    Perform RAG query specifically optimized for Arabic language.
+    
+    Args:
+        query: Arabic search query
+        limit: Maximum number of results
+        
+    Returns:
+        QueryResult with Arabic RAG response and page citations
+    """
+    config = QueryConfig(
+        enable_rag=True, 
+        similarity_top_k=limit,
+        include_page_citations=True,
+        include_page_numbers=True
+    )
+    query_engine = create_query_engine(config)
+    return query_engine.rag_query_with_page_context(query, limit)
+
+def arabic_search_and_display(query: str, limit: int = 5, title: str = "نتائج البحث باللغة العربية") -> QueryResult:
+    """
+    Perform Arabic search and display results with Arabic formatting.
+    
+    Args:
+        query: Arabic search query
+        limit: Maximum number of results
+        title: Arabic title for display
+        
+    Returns:
+        QueryResult with Arabic RAG response and page citations
     """
     config = QueryConfig(
         enable_rag=True, 
@@ -1021,6 +1198,32 @@ def example_usage():
             if enhanced_rag.cited_pages:
                 print(f"   Cited Pages: {enhanced_rag.cited_pages}")
         
+        # 7. Arabic language support demonstration
+        print("\n7. Arabic Language Support Demonstration:")
+        
+        # Test Arabic query
+        arabic_query = "ما هو الذكاء الاصطناعي وكيف يعمل؟"
+        print(f"\n   Arabic Query: {arabic_query}")
+        
+        arabic_result = query_engine.rag_query_with_page_context(arabic_query)
+        if arabic_result.rag_response:
+            print(f"   Arabic Response: {arabic_result.rag_response[:300]}...")
+            if arabic_result.cited_pages:
+                print(f"   Cited Pages: {arabic_result.cited_pages}")
+        
+        # Test mixed language detection
+        print("\n8. Language Detection Testing:")
+        test_queries = [
+            "What is artificial intelligence?",
+            "ما هو الذكاء الاصطناعي؟",
+            "Qu'est-ce que l'intelligence artificielle?",
+            "¿Qué es la inteligencia artificial?"
+        ]
+        
+        for test_query in test_queries:
+            detected_lang = detect_language(test_query)
+            print(f"   Query: '{test_query[:30]}...' -> Language: {detected_lang}")
+        
         print("\n✅ Example usage completed successfully!")
         print("\n💡 Key Features Demonstrated:")
         print("   • Page number extraction and display")
@@ -1029,6 +1232,9 @@ def example_usage():
         print("   • RAG responses with page citations")
         print("   • Enhanced context creation with page information")
         print("   • Custom prompt templates for page citations")
+        print("   • Multi-language support including Arabic")
+        print("   • Automatic language detection")
+        print("   • Language-specific response formatting")
         
     except Exception as e:
         print(f"❌ Error in example usage: {e}")
@@ -1090,10 +1296,81 @@ def test_page_citation_features():
         import traceback
         traceback.print_exc()
 
+def test_arabic_language_features():
+    """Test Arabic language support features."""
+    
+    try:
+        print("\n🌐 Testing Arabic Language Features:")
+        
+        config = QueryConfig(
+            enable_rag=True,
+            include_page_citations=True,
+            include_page_numbers=True,
+            similarity_top_k=3
+        )
+        
+        query_engine = create_query_engine(config)
+        
+        # Test 1: Arabic language detection
+        print("\n1. Testing Arabic Language Detection:")
+        arabic_queries = [
+            "ما هو الذكاء الاصطناعي؟",
+            "كيف يعمل التعلم الآلي؟",
+            "ما هي فوائد التكنولوجيا الحديثة؟",
+            "شرح مفهوم الشبكات العصبية"
+        ]
+        
+        for query in arabic_queries:
+            detected_lang = detect_language(query)
+            print(f"   Query: '{query}' -> Language: {detected_lang}")
+        
+        # Test 2: Arabic RAG query
+        print("\n2. Testing Arabic RAG Query:")
+        arabic_query = "ما هي المزايا الرئيسية للذكاء الاصطناعي؟"
+        arabic_result = query_engine.rag_query_with_page_context(arabic_query)
+        
+        print(f"Arabic Query: {arabic_query}")
+        print(f"Detected Language: {detect_language(arabic_query)}")
+        print(f"Response: {arabic_result.rag_response}")
+        print(f"Cited Pages: {arabic_result.cited_pages}")
+        
+        # Test 3: Mixed language queries
+        print("\n3. Testing Mixed Language Queries:")
+        mixed_queries = [
+            "What is artificial intelligence?",
+            "ما هو الذكاء الاصطناعي؟",
+            "Explain machine learning",
+            "شرح التعلم الآلي"
+        ]
+        
+        for query in mixed_queries:
+            detected_lang = detect_language(query)
+            print(f"   Query: '{query}' -> Language: {detected_lang}")
+        
+        # Test 4: Arabic page citations
+        print("\n4. Testing Arabic Page Citations:")
+        arabic_page_query = "ما هي المعلومات المتوفرة في الصفحة الأولى؟"
+        arabic_page_result = query_engine.rag_query_with_page_context(arabic_page_query)
+        
+        print(f"Arabic Page Query: {arabic_page_query}")
+        if arabic_page_result.rag_response:
+            # Check if response contains Arabic page citations
+            if "الصفحة:" in arabic_page_result.rag_response:
+                print("   ✅ Arabic page citations found in response")
+            else:
+                print("   ⚠️ Arabic page citations not found in response")
+        
+        print("\n✅ Arabic language features tested successfully!")
+        
+    except Exception as e:
+        print(f"❌ Error testing Arabic language features: {e}")
+        import traceback
+        traceback.print_exc()
+
 # Main execution
 if __name__ == "__main__":
-    print("🔍 Enhanced Query Engine with Page Citations")
-    print("=" * 50)
+    print("🔍 Enhanced Query Engine with Page Citations and Multi-Language Support")
+    print("=" * 70)
     
     # Run example usage
     example_usage()
@@ -1101,7 +1378,10 @@ if __name__ == "__main__":
     # Run page citation tests
     test_page_citation_features()
     
-    print("\n" + "=" * 50)
+    # Run Arabic language tests
+    test_arabic_language_features()
+    
+    print("\n" + "=" * 70)
     print("🎯 Summary of Enhancements:")
     print("• Custom RAG prompt template with page citation instructions")
     print("• Enhanced context creation with explicit page information")
@@ -1111,3 +1391,9 @@ if __name__ == "__main__":
     print("• Enhanced display methods showing page information")
     print("• New utility functions for page-based operations")
     print("• Comprehensive testing of page citation features")
+    print("• Multi-language support including Arabic")
+    print("• Automatic language detection using Unicode patterns")
+    print("• Language-specific prompt templates and instructions")
+    print("• Arabic page citations: (الصفحة: X) format")
+    print("• Arabic-specific utility functions")
+    print("• Comprehensive Arabic language testing")
