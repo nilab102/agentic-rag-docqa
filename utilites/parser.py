@@ -395,7 +395,20 @@ class SmartDocumentProcessor:
             - Mark the end of content with [CHUNK_END]
             - Preserve all content between these markers
             
-            6. SPECIAL ELEMENTS:
+            6. GRAPH AND IMAGE HANDLING:
+            - Identify ALL graphs, charts, diagrams, and images in the document
+            - Mark graph boundaries with [GRAPH_START: Type] and [GRAPH_END]
+            - Mark image boundaries with [IMAGE_START: Type] and [IMAGE_END]
+            - Provide DETAILED descriptions of ALL visual elements:
+                * For graphs/charts: Describe chart type (bar, line, pie, scatter, etc.), axes labels, data trends, key values, colors, legends, and insights
+                * For diagrams: Describe all components, connections, flow direction, labels, and relationships
+                * For images: Describe objects, people, scenes, text visible, colors, layout, and context
+                * For tables in graphs: Extract all data points, headers, and values
+            - Include ALL numerical data, percentages, and text visible in graphs
+            - Describe trends, patterns, and key findings from visual data
+            - Mark complex visual elements as [COMPLEX_VISUAL_START: Description] and [COMPLEX_VISUAL_END]
+            
+            7. SPECIAL ELEMENTS:
             - Mark figures/images as [FIGURE_START: Description] and [FIGURE_END]
             - Mark footnotes as [FOOTNOTE: content]
             - Mark headers/footers: [HEADER: content] and [FOOTER: content]
@@ -485,7 +498,20 @@ class SmartDocumentProcessor:
         - Mark the end of content with [CHUNK_END]
         - Preserve all content between these markers
         
-        6. SPECIAL ELEMENTS:
+        6. GRAPH AND IMAGE HANDLING:
+        - Identify ALL graphs, charts, diagrams, and images in the document
+        - Mark graph boundaries with [GRAPH_START: Type] and [GRAPH_END]
+        - Mark image boundaries with [IMAGE_START: Type] and [IMAGE_END]
+        - Provide DETAILED descriptions of ALL visual elements:
+            * For graphs/charts: Describe chart type (bar, line, pie, scatter, etc.), axes labels, data trends, key values, colors, legends, and insights
+            * For diagrams: Describe all components, connections, flow direction, labels, and relationships
+            * For images: Describe objects, people, scenes, text visible, colors, layout, and context
+            * For tables in graphs: Extract all data points, headers, and values
+        - Include ALL numerical data, percentages, and text visible in graphs
+        - Describe trends, patterns, and key findings from visual data
+        - Mark complex visual elements as [COMPLEX_VISUAL_START: Description] and [COMPLEX_VISUAL_END]
+        
+        7. SPECIAL ELEMENTS:
         - Mark figures/images as [FIGURE_START: Description] and [FIGURE_END]
         - Mark footnotes as [FOOTNOTE: content]
         - Mark headers/footers: [HEADER: content] and [FOOTER: content]
@@ -787,6 +813,9 @@ class SmartDocumentProcessor:
             'paragraphs': [],
             'tables': [],
             'figures': [],
+            'graphs': [],
+            'images': [],
+            'complex_visuals': [],
             'lists': [],
             'code_blocks': [],
             'quotes': [],
@@ -839,6 +868,42 @@ class SmartDocumentProcessor:
                 'content': content.strip(),
                 'start_pos': text.find(f'[TABLE_START: {description}]'),
                 'row_count': len([line for line in content.split('\n') if line.strip()])
+            })
+        
+        # Extract graphs
+        graph_pattern = r'\[GRAPH_START: ([^\]]*)\](.*?)\[GRAPH_END\]'
+        graphs = re.findall(graph_pattern, text, re.DOTALL)
+        for i, (graph_type, content) in enumerate(graphs):
+            structure['graphs'].append({
+                'id': f'graph_{i+1}',
+                'type': graph_type.strip(),
+                'content': content.strip(),
+                'start_pos': text.find(f'[GRAPH_START: {graph_type}]'),
+                'description_length': len(content.strip())
+            })
+        
+        # Extract images
+        image_pattern = r'\[IMAGE_START: ([^\]]*)\](.*?)\[IMAGE_END\]'
+        images = re.findall(image_pattern, text, re.DOTALL)
+        for i, (image_type, content) in enumerate(images):
+            structure['images'].append({
+                'id': f'image_{i+1}',
+                'type': image_type.strip(),
+                'content': content.strip(),
+                'start_pos': text.find(f'[IMAGE_START: {image_type}]'),
+                'description_length': len(content.strip())
+            })
+        
+        # Extract complex visuals
+        complex_visual_pattern = r'\[COMPLEX_VISUAL_START: ([^\]]*)\](.*?)\[COMPLEX_VISUAL_END\]'
+        complex_visuals = re.findall(complex_visual_pattern, text, re.DOTALL)
+        for i, (description, content) in enumerate(complex_visuals):
+            structure['complex_visuals'].append({
+                'id': f'complex_visual_{i+1}',
+                'description': description.strip(),
+                'content': content.strip(),
+                'start_pos': text.find(f'[COMPLEX_VISUAL_START: {description}]'),
+                'description_length': len(content.strip())
             })
         
         return structure
@@ -1077,6 +1142,9 @@ class SmartDocumentProcessor:
             ('CODE_START', 'CODE_END'),
             ('QUOTE_START', 'QUOTE_END'),
             ('FIGURE_START', 'FIGURE_END'),
+            ('GRAPH_START', 'GRAPH_END'),
+            ('IMAGE_START', 'IMAGE_END'),
+            ('COMPLEX_VISUAL_START', 'COMPLEX_VISUAL_END'),
             ('PAGE_START', 'PAGE_END')  # Added page markers
         ]
         
@@ -1503,6 +1571,85 @@ Page marker distribution:
             'has_page_markers': validation['has_page_markers'],
             'is_valid': validation['is_valid']
         }
+
+    def extract_visual_elements(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract and analyze all visual elements (graphs, images, charts) from processed text.
+        
+        Args:
+            text: The extracted text to analyze
+            
+        Returns:
+            Dictionary containing all visual elements with detailed information
+        """
+        visual_elements = {
+            'graphs': [],
+            'images': [],
+            'complex_visuals': [],
+            'figures': [],
+            'total_visuals': 0
+        }
+        
+        # Extract graphs
+        graph_pattern = r'\[GRAPH_START: ([^\]]*)\](.*?)\[GRAPH_END\]'
+        graphs = re.findall(graph_pattern, text, re.DOTALL)
+        for i, (graph_type, content) in enumerate(graphs):
+            visual_elements['graphs'].append({
+                'id': f'graph_{i+1}',
+                'type': graph_type.strip(),
+                'content': content.strip(),
+                'description_length': len(content.strip()),
+                'has_data': any(char.isdigit() for char in content),
+                'has_percentages': '%' in content,
+                'has_trends': any(word in content.lower() for word in ['increase', 'decrease', 'trend', 'growth', 'decline'])
+            })
+        
+        # Extract images
+        image_pattern = r'\[IMAGE_START: ([^\]]*)\](.*?)\[IMAGE_END\]'
+        images = re.findall(image_pattern, text, re.DOTALL)
+        for i, (image_type, content) in enumerate(images):
+            visual_elements['images'].append({
+                'id': f'image_{i+1}',
+                'type': image_type.strip(),
+                'content': content.strip(),
+                'description_length': len(content.strip()),
+                'has_text': any(char.isalpha() for char in content),
+                'has_people': any(word in content.lower() for word in ['person', 'people', 'man', 'woman', 'child']),
+                'has_objects': any(word in content.lower() for word in ['object', 'item', 'thing', 'building', 'car'])
+            })
+        
+        # Extract complex visuals
+        complex_visual_pattern = r'\[COMPLEX_VISUAL_START: ([^\]]*)\](.*?)\[COMPLEX_VISUAL_END\]'
+        complex_visuals = re.findall(complex_visual_pattern, text, re.DOTALL)
+        for i, (description, content) in enumerate(complex_visuals):
+            visual_elements['complex_visuals'].append({
+                'id': f'complex_visual_{i+1}',
+                'description': description.strip(),
+                'content': content.strip(),
+                'description_length': len(content.strip()),
+                'complexity_score': len(content.split()) // 10  # Rough complexity measure
+            })
+        
+        # Extract figures (legacy marker)
+        figure_pattern = r'\[FIGURE_START: ([^\]]*)\](.*?)\[FIGURE_END\]'
+        figures = re.findall(figure_pattern, text, re.DOTALL)
+        for i, (description, content) in enumerate(figures):
+            visual_elements['figures'].append({
+                'id': f'figure_{i+1}',
+                'description': description.strip(),
+                'content': content.strip(),
+                'description_length': len(content.strip())
+            })
+        
+        # Calculate total
+        visual_elements['total_visuals'] = (
+            len(visual_elements['graphs']) + 
+            len(visual_elements['images']) + 
+            len(visual_elements['complex_visuals']) + 
+            len(visual_elements['figures'])
+        )
+        
+        return visual_elements
  
 
 def main():
