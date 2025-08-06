@@ -11,9 +11,9 @@ import google.generativeai as genai
 import numpy as np
 
 # Import all required components
-from parser import SmartDocumentProcessor
-from chunker import SmartTextChunker, Chunk
-from vector_storage import VectorStorage, DatabaseConfig, DocumentChunk, create_database_config_from_env
+from .parser import SmartDocumentProcessor
+from .chunker import SmartTextChunker, Chunk
+from .vector_storage import VectorStorage, DatabaseConfig, DocumentChunk, create_database_config_from_env
 
 # Load environment variables
 load_dotenv(override=True)
@@ -28,21 +28,21 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PipelineConfig:
     """Configuration for the document processing pipeline."""
-    # Parser settings
-    max_pages_per_chunk: int = 3
+    # Parser settings - Parse one page at a time
+    max_pages_per_chunk: int = 1
     boundary_sentences: int = 2
     boundary_table_rows: int = 2
     
-    # Chunker settings
-    target_pages_per_chunk: int = 5
+    # Chunker settings - After merging, chunk 3-5 pages
+    target_pages_per_chunk: int = 4  # Target middle of 3-5 range
     overlap_pages: int = 1
-    max_pages_per_chunk_chunker: int = 5
-    min_pages_per_chunk: int = 1
+    max_pages_per_chunk_chunker: int = 5  # Max 5 pages
+    min_pages_per_chunk: int = 3  # Min 3 pages
     respect_boundaries: bool = True
     
     # Embedding settings
-    embedding_model: str = "gemini-embedding-exp-03-07"
-    embedding_dimension: int = 1536
+    embedding_model: str = os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001")
+    embedding_dimension: int = 3072 if "embedding-exp-03-07" in os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001") else 768
     embedding_task: str = "RETRIEVAL_DOCUMENT"
     
     # Database settings
@@ -153,15 +153,22 @@ class GeminiTextProcessor:
 class GeminiEmbeddingGenerator:
     """Handles embedding generation using Gemini."""
     
-    def __init__(self, api_key: str, model_name: str = "gemini-embedding-exp-03-07"):
+    def __init__(self, api_key: str, model_name: str = None):
         self.api_key = api_key
-        self.model_name = model_name
+        self.model_name = model_name or os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001")
         genai.configure(api_key=api_key)
     
     async def generate_embedding(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT", 
-                               output_dimensionality: int = 1536) -> Optional[List[float]]:
+                               output_dimensionality: int = None) -> Optional[List[float]]:
         """Generate embedding for text."""
         try:
+            # Auto-detect dimensionality if not specified
+            if output_dimensionality is None:
+                model_name = os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001")
+                if "embedding-exp-03-07" in model_name:
+                    output_dimensionality = 3072
+                else:
+                    output_dimensionality = 768
             result = genai.embed_content(
                 model=self.model_name,
                 content=text,
@@ -177,7 +184,7 @@ class GeminiEmbeddingGenerator:
             return None
     
     async def generate_embeddings_batch(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT",
-                                      output_dimensionality: int = 1536) -> List[Optional[List[float]]]:
+                                      output_dimensionality: int = None) -> List[Optional[List[float]]]:
         """Generate embeddings for multiple texts."""
         embeddings = []
         
@@ -216,7 +223,7 @@ class DocumentProcessingPipeline:
         )
         
         self.text_processor = GeminiTextProcessor(self.api_key)
-        self.embedding_generator = GeminiEmbeddingGenerator(self.api_key, config.embedding_model)
+        self.embedding_generator = GeminiEmbeddingGenerator(self.api_key)
         
         # Initialize vector storage
         if config.db_config:
@@ -434,13 +441,13 @@ class DocumentProcessingPipeline:
 # Main function for easy usage
 async def process_document_pipeline(
     file_path: str,
-    max_pages_per_chunk: int = 3,
+    max_pages_per_chunk: int = 1,  # Parse one page at a time
     boundary_sentences: int = 2,
     boundary_table_rows: int = 2,
-    target_pages_per_chunk: int = 5,
+    target_pages_per_chunk: int = 4,  # Target middle of 3-5 range
     overlap_pages: int = 1,
-    max_pages_per_chunk_chunker: int = 5,
-    min_pages_per_chunk: int = 1,
+    max_pages_per_chunk_chunker: int = 5,  # Max 5 pages
+    min_pages_per_chunk: int = 3,  # Min 3 pages
     respect_boundaries: bool = True,
     embedding_model: str = "gemini-embedding-exp-03-07",
     embedding_dimension: int = 1536,
@@ -541,8 +548,8 @@ async def process_document_endpoint(
     }
     
     default_embedding_config = {
-        "embedding_model": "gemini-embedding-exp-03-07",
-        "embedding_dimension": 1536,
+        "embedding_model": os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001"),
+        "embedding_dimension": 768,
         "embedding_task": "RETRIEVAL_DOCUMENT",
         "batch_size": 10,
         "delay_between_requests": 1.0,
@@ -750,16 +757,16 @@ async def example_usage():
         # Process the document
         result = await process_document_pipeline(
             file_path=file_path,
-            max_pages_per_chunk=21,
+            max_pages_per_chunk=2,
             boundary_sentences=2,
             boundary_table_rows=2,
-            target_pages_per_chunk=21,
+            target_pages_per_chunk=1,
             overlap_pages=1,
-            max_pages_per_chunk_chunker=5,
+            max_pages_per_chunk_chunker=2,
             min_pages_per_chunk=1,
             respect_boundaries=True,
-            embedding_model="gemini-embedding-exp-03-07",
-            embedding_dimension=1536,
+                                embedding_model=os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001"),
+            embedding_dimension=768,
             embedding_task="RETRIEVAL_DOCUMENT",
             batch_size=10,
             delay_between_requests=1.0,

@@ -95,12 +95,11 @@ class SmartTextChunker:
         self.min_pages_per_chunk = min_pages_per_chunk
         self.respect_boundaries = respect_boundaries
         
-        # Updated patterns for finding page boundaries with new parser format
+        # Updated patterns for finding page boundaries with manual page numbering
         self.page_patterns = [
-            r'\[PAGE_START:\s*-(\d+)\](.*?)(?=\[PAGE_START:\s*-|\[PAGE_END:\s*-0\]|$)',  # New parser format with numbered pages
-            r'\[PAGE_START:\s*-(\d+)\](.*?)(?=\[PAGE_START:\s*-|$)',  # Page with start marker only
+            r'PAGE_NUMBER:\s*(\d+)\s*\n\[PAGE_START\](.*?)(?=PAGE_NUMBER:\s*\d+\s*\n\[PAGE_START\]|\[PAGE_END\]|$)',  # Manual page numbering format
+            r'\[PAGE_START\](.*?)(?=\[PAGE_START\]|\[PAGE_END\]|$)',  # Simple page markers (fallback)
             r'\[PAGE_START\](.*?)\[PAGE_BREAK\]',  # Legacy format for backward compatibility
-            r'\[PAGE_START\](.*?)(?=\[PAGE_START\]|$)',  # Legacy format with start marker only
             r'(?:^|\n).*?Page\s+(\d+).*?\n(.*?)(?=Page\s+\d+|$)',  # Traditional page numbering
         ]
         
@@ -157,8 +156,8 @@ class SmartTextChunker:
         """Extract pages from text based on page markers."""
         pages = []
         
-        # Method 1: Try to find pages with new parser format [PAGE_START: -N] and [PAGE_END: -0]
-        page_pattern = r'\[PAGE_START:\s*-(\d+)\](.*?)(?=\[PAGE_START:\s*-|\[PAGE_END:\s*-0\]|$)'
+        # Method 1: Try to find pages with manual page numbering format
+        page_pattern = r'PAGE_NUMBER:\s*(\d+)\s*\n\[PAGE_START\](.*?)(?=PAGE_NUMBER:\s*\d+\s*\n\[PAGE_START\]|\[PAGE_END\]|$)'
         page_matches = list(re.finditer(page_pattern, text, re.DOTALL))
         
         if page_matches:
@@ -168,10 +167,7 @@ class SmartTextChunker:
                 
                 if content:  # Only add non-empty pages
                     try:
-                        # Convert negative page number to positive for easier handling
                         page_num = int(page_num_str)
-                        # Convert negative to positive (e.g., -1 becomes 1, -2 becomes 2)
-                        page_num = abs(page_num)
                         
                         page = Page(
                             content=content,
@@ -185,12 +181,12 @@ class SmartTextChunker:
                         print(f"Warning: Could not parse page number '{page_num_str}'")
                         continue
         else:
-            # Method 2: Try legacy format [PAGE_START] without numbers
-            legacy_pattern = r'\[PAGE_START\](.*?)(?=\[PAGE_START\]|\[PAGE_BREAK\]|$)'
-            legacy_matches = list(re.finditer(legacy_pattern, text, re.DOTALL))
+            # Method 2: Try simple [PAGE_START] format without PAGE_NUMBER header
+            simple_pattern = r'\[PAGE_START\](.*?)(?=\[PAGE_START\]|\[PAGE_END\]|$)'
+            simple_matches = list(re.finditer(simple_pattern, text, re.DOTALL))
             
-            if legacy_matches:
-                for i, match in enumerate(legacy_matches):
+            if simple_matches:
+                for i, match in enumerate(simple_matches):
                     content = match.group(1).strip()
                     if content and len(content.split()) > 10:  # Only meaningful pages
                         page_num = self.extract_page_number_from_content(content)
@@ -232,12 +228,13 @@ class SmartTextChunker:
         """Extract page number from page content."""
         # Look for various page number patterns
         patterns = [
+            r'PAGE_NUMBER:\s*(\d+)',  # New format with PAGE_NUMBER header
             r'Page\s+(\d+)',
             r'^\s*(\d+)\s*$',
             r'- (\d+) -',
             r'\[(\d+)\]',
             r'(?:^|\n)\s*(\d+)\s*(?:\n|$)',
-            # New patterns for the updated parser format
+            # Legacy patterns for backward compatibility
             r'\[PAGE_START:\s*-(\d+)\]',
             r'\[PAGE_END:\s*-(\d+)\]'
         ]
@@ -247,7 +244,7 @@ class SmartTextChunker:
             if matches:
                 try:
                     page_num = int(matches[0])
-                    # If it's a negative number (from new format), convert to positive
+                    # If it's a negative number (from legacy format), convert to positive
                     return abs(page_num)
                 except ValueError:
                     continue
