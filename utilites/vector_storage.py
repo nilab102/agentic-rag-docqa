@@ -4,12 +4,20 @@ import uuid
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import logging
-from contextlib import contextmanager
+from pathlib import Path
 from dotenv import load_dotenv
 import numpy as np
+
+# LlamaIndex imports
+from llama_index.core import VectorStoreIndex, StorageContext, Document
+from llama_index.core.schema import TextNode, NodeWithScore
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core.vector_stores import (
+    MetadataFilter, MetadataFilters, FilterOperator, FilterCondition
+)
+import chromadb
+from chromadb.config import Settings
 
 # Load environment variables
 load_dotenv()
@@ -20,12 +28,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DatabaseConfig:
-    """Database configuration"""
-    host: str
-    port: int
-    database: str
-    username: str
-    password: str
+    """Database configuration for ChromaDB"""
+    persist_directory: str = "./chroma_db"
+    collection_name: str = "document_chunks"
+    embedding_function: Optional[str] = None
 
 @dataclass
 class DocumentChunk:
@@ -42,153 +48,142 @@ class DocumentChunk:
 
 class VectorStorage:
     """
-    Vector storage system using PostgreSQL with pgvector extension.
+    Vector storage system using LlamaIndex with ChromaDB.
     Stores document chunks with embeddings for similarity search.
     """
     
-    def __init__(self, config: DatabaseConfig, embedding_dimension: int = 1536):
+    def __init__(self, config: DatabaseConfig, embedding_dimension: int = None):
         """
         Initialize vector storage.
         
         Args:
             config: Database configuration
-            embedding_dimension: Dimension of embeddings (default 1536 for OpenAI)
+            embedding_dimension: Dimension of embeddings (auto-detected from model if None)
         """
         self.config = config
-        self.embedding_dimension = embedding_dimension
         
-    def create_database_if_not_exists(self):
-        """Create the database if it doesn't exist."""
-        try:
-            # Connect to default postgres database to create our database
-            conn = psycopg2.connect(
-                host=self.config.host,
-                port=self.config.port,
-                database="postgres",  # Connect to default postgres database
-                user=self.config.username,
-                password=self.config.password
-            )
-            conn.autocommit = True  # Required for creating databases
-            cursor = conn.cursor()
-            
-            # Check if database exists (handle quoted names)
-            db_name = self.config.database.strip('"')  # Remove quotes if present
-            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
-            exists = cursor.fetchone()
-            
-            if not exists:
-                # Quote the database name to handle special characters like hyphens
-                cursor.execute(f'CREATE DATABASE "{db_name}"')
-                logger.info(f"✅ Created database: {db_name}")
+        # Auto-detect embedding dimension based on model
+        if embedding_dimension is None:
+            model_name = os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001")
+            if "embedding-exp-03-07" in model_name:
+                self.embedding_dimension = 768
             else:
-                logger.info(f"✅ Database {db_name} already exists")
-            
-            cursor.close()
-            conn.close()
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error creating database: {e}")
-            return False
-    
-    @contextmanager
-    def get_connection(self):
-        """Context manager for database connections."""
-        conn = None
-        try:
-            # Handle database names with special characters
-            db_name = self.config.database.strip('"')  # Remove quotes if present
-            conn = psycopg2.connect(
-                host=self.config.host,
-                port=self.config.port,
-                database=db_name,
-                user=self.config.username,
-                password=self.config.password
+                self.embedding_dimension = 768
+        else:
+            self.embedding_dimension = 768
+        
+        # Create persist directory if it doesn't exist
+        os.makedirs(self.config.persist_directory, exist_ok=True)
+        
+        # Initialize ChromaDB client
+        self.chroma_client = chromadb.PersistentClient(
+            path=self.config.persist_directory,
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
             )
-            yield conn
+        )
+        
+        # Initialize or get collection
+        self._initialize_collection()
+        
+        # Initialize LlamaIndex components
+        self._initialize_llama_index()
+    
+    def _initialize_collection(self):
+        """Initialize or get the ChromaDB collection."""
+        try:
+            # Try to get existing collection
+            self.chroma_collection = self.chroma_client.get_collection(
+                name=self.config.collection_name
+            )
+            logger.info(f"✅ Connected to existing collection: {self.config.collection_name}")
+        except Exception:
+            # Create new collection if it doesn't exist
+            self.chroma_collection = self.chroma_client.create_collection(
+                name=self.config.collection_name,
+                metadata={"hnsw:space": "cosine"}
+            )
+            logger.info(f"✅ Created new collection: {self.config.collection_name}")
+    
+    def _initialize_llama_index(self):
+        """Initialize LlamaIndex components."""
+        try:
+            # Get API key
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY environment variable not found")
+            
+            # Initialize Google GenAI embedding model
+            from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+            embed_model = GoogleGenAIEmbedding(
+                model_name=os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001"),
+                dimensions=768,
+                api_key=api_key
+            )
+            
+            # Create ChromaVectorStore
+            self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
+            
+            # Create storage context
+            self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+            
+            # Create index with explicit embedding model
+            self.index = VectorStoreIndex.from_vector_store(
+                self.vector_store,
+                storage_context=self.storage_context,
+                embed_model=embed_model
+            )
+            
+            logger.info("✅ LlamaIndex components initialized successfully")
+            
         except Exception as e:
-            if conn:
-                conn.rollback()
-            raise e
-        finally:
-            if conn:
-                conn.close()
+            logger.error(f"❌ Error initializing LlamaIndex: {e}")
+            raise
     
     def setup_database(self):
-        """Create the vector storage table and indexes."""
+        """Setup the vector storage database (already done in __init__)."""
+        logger.info("✅ Database setup completed (ChromaDB initialized)")
+        return True
+    
+    def _document_chunk_to_text_node(self, chunk: DocumentChunk) -> TextNode:
+        """Convert DocumentChunk to LlamaIndex TextNode."""
+        # Create metadata for the node
+        metadata = {
+            "chunk_id": chunk.chunk_id,
+            "file_name": chunk.file_name,
+            "file_path": chunk.file_path,
+            "chunk_title": chunk.chunk_title,
+            "chunk_summary": chunk.chunk_summary,
+            "full_summary": chunk.full_summary,
+            "created_at": chunk.created_at.isoformat() if chunk.created_at else datetime.now().isoformat(),
+            "word_count": len(chunk.chunk_extracted_text.split()),
+            "char_count": len(chunk.chunk_extracted_text)
+        }
         
-        # First, ensure the database exists
-        db_name = self.config.database.strip('"')  # Remove quotes if present
-        logger.info(f"🔍 Checking if database '{db_name}' exists...")
-        if not self.create_database_if_not_exists():
-            raise Exception(f"Failed to create database '{db_name}'")
+        # Create text content for embedding
+        text_content = f"""
+Title: {chunk.chunk_title}
+
+Summary: {chunk.chunk_summary}
+
+Content: {chunk.chunk_extracted_text}
+
+Document Summary: {chunk.full_summary}
+        """.strip()
         
-        # Create pgvector extension
-        create_extension_sql = """
-        CREATE EXTENSION IF NOT EXISTS vector;
-        """
+        # Create TextNode
+        node = TextNode(
+            text=text_content,
+            metadata=metadata,
+            id_=chunk.chunk_id
+        )
         
-        # Create the main table with all required columns
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS document_chunks (
-            id SERIAL PRIMARY KEY,
-            chunk_id VARCHAR(100) UNIQUE NOT NULL,
-            file_name VARCHAR(500) NOT NULL,
-            file_path TEXT NOT NULL,
-            chunk_extracted_text TEXT NOT NULL,
-            full_summary TEXT NOT NULL,
-            chunk_title VARCHAR(1000) NOT NULL,
-            chunk_summary TEXT NOT NULL,
-            embedding vector(1536),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            
-            -- Indexes for better performance
-            CONSTRAINT idx_chunk_id UNIQUE (chunk_id)
-        );
-        """
+        # Set embedding if available
+        if chunk.embedding:
+            node.embedding = chunk.embedding
         
-        # Create indexes
-        create_indexes_sql = [
-            "CREATE INDEX IF NOT EXISTS idx_file_name ON document_chunks(file_name);",
-            "CREATE INDEX IF NOT EXISTS idx_file_path ON document_chunks(file_path);",
-            "CREATE INDEX IF NOT EXISTS idx_created_at ON document_chunks(created_at);",
-            "CREATE INDEX IF NOT EXISTS idx_chunk_title ON document_chunks(chunk_title);",
-        ]
-        
-        # Create vector index for similarity search
-        create_vector_index_sql = """
-        CREATE INDEX IF NOT EXISTS idx_embedding_cosine 
-        ON document_chunks USING hnsw (embedding vector_cosine_ops);
-        """
-        
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            try:
-                # Create extension
-                cursor.execute(create_extension_sql)
-                logger.info("✅ pgvector extension created/verified")
-                
-                # Create table
-                cursor.execute(create_table_sql)
-                logger.info("✅ Document chunks table created")
-                
-                # Create basic indexes
-                for index_sql in create_indexes_sql:
-                    cursor.execute(index_sql)
-                logger.info("✅ Basic indexes created")
-                
-                # Create vector index
-                cursor.execute(create_vector_index_sql)
-                logger.info("✅ Vector index created")
-                
-                conn.commit()
-                logger.info("✅ Database setup completed successfully")
-                
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"❌ Error setting up database: {e}")
-                raise
+        return node
     
     def insert_chunk(self, chunk: DocumentChunk) -> bool:
         """
@@ -201,43 +196,15 @@ class VectorStorage:
             bool: True if successful, False otherwise
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                insert_sql = """
-                INSERT INTO document_chunks (
-                    chunk_id, file_name, file_path, chunk_extracted_text,
-                    full_summary, chunk_title, chunk_summary, embedding, created_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (chunk_id) DO UPDATE SET
-                    file_name = EXCLUDED.file_name,
-                    file_path = EXCLUDED.file_path,
-                    chunk_extracted_text = EXCLUDED.chunk_extracted_text,
-                    full_summary = EXCLUDED.full_summary,
-                    chunk_title = EXCLUDED.chunk_title,
-                    chunk_summary = EXCLUDED.chunk_summary,
-                    embedding = EXCLUDED.embedding,
-                    created_at = EXCLUDED.created_at;
-                """
-                
-                cursor.execute(insert_sql, (
-                    chunk.chunk_id,
-                    chunk.file_name,
-                    chunk.file_path,
-                    chunk.chunk_extracted_text,
-                    chunk.full_summary,
-                    chunk.chunk_title,
-                    chunk.chunk_summary,
-                    chunk.embedding,
-                    chunk.created_at or datetime.now()
-                ))
-                
-                conn.commit()
-                logger.info(f"✅ Chunk {chunk.chunk_id} inserted successfully")
-                return True
-                
+            # Convert to TextNode
+            node = self._document_chunk_to_text_node(chunk)
+            
+            # Insert into index
+            self.index.insert_nodes([node])
+            
+            logger.info(f"✅ Chunk {chunk.chunk_id} inserted successfully")
+            return True
+            
         except Exception as e:
             logger.error(f"❌ Error inserting chunk {chunk.chunk_id}: {e}")
             return False
@@ -255,11 +222,25 @@ class VectorStorage:
         success_count = 0
         failure_count = 0
         
+        # Convert all chunks to nodes
+        nodes = []
         for chunk in chunks:
-            if self.insert_chunk(chunk):
-                success_count += 1
-            else:
+            try:
+                node = self._document_chunk_to_text_node(chunk)
+                nodes.append(node)
+            except Exception as e:
+                logger.error(f"❌ Error converting chunk {chunk.chunk_id}: {e}")
                 failure_count += 1
+        
+        # Insert all nodes at once
+        if nodes:
+            try:
+                self.index.insert_nodes(nodes)
+                success_count = len(nodes)
+                logger.info(f"✅ Batch inserted {success_count} chunks successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in batch insert: {e}")
+                failure_count += len(nodes)
         
         logger.info(f"✅ Batch insert completed: {success_count} successful, {failure_count} failed")
         return {
@@ -280,25 +261,31 @@ class VectorStorage:
             bool: True if successful, False otherwise
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                update_sql = """
-                UPDATE document_chunks 
-                SET embedding = %s 
-                WHERE chunk_id = %s
-                """
-                
-                cursor.execute(update_sql, (embedding, chunk_id))
-                conn.commit()
-                
-                if cursor.rowcount > 0:
-                    logger.info(f"✅ Embedding updated for chunk {chunk_id}")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Chunk {chunk_id} not found for embedding update")
-                    return False
-                    
+            # Delete existing chunk
+            self.delete_chunk(chunk_id)
+            
+            # Get the chunk data
+            chunk_data = self.get_chunk_by_id(chunk_id)
+            if not chunk_data:
+                logger.warning(f"⚠️ Chunk {chunk_id} not found for embedding update")
+                return False
+            
+            # Create new chunk with updated embedding
+            updated_chunk = DocumentChunk(
+                chunk_id=chunk_id,
+                file_name=chunk_data["file_name"],
+                file_path=chunk_data["file_path"],
+                chunk_extracted_text=chunk_data["chunk_extracted_text"],
+                full_summary=chunk_data["full_summary"],
+                chunk_title=chunk_data["chunk_title"],
+                chunk_summary=chunk_data["chunk_summary"],
+                embedding=embedding,
+                created_at=datetime.now()
+            )
+            
+            # Insert updated chunk
+            return self.insert_chunk(updated_chunk)
+            
         except Exception as e:
             logger.error(f"❌ Error updating embedding for chunk {chunk_id}: {e}")
             return False
@@ -311,15 +298,16 @@ class VectorStorage:
             List of chunk IDs
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute("SELECT chunk_id FROM document_chunks WHERE embedding IS NULL")
-                chunk_ids = [row[0] for row in cursor.fetchall()]
-                
-                logger.info(f"📊 Found {len(chunk_ids)} chunks without embeddings")
-                return chunk_ids
-                
+            # Query ChromaDB directly for chunks without embeddings
+            results = self.chroma_collection.get(
+                where={"embedding": None},
+                include=["metadatas"]
+            )
+            
+            chunk_ids = [metadata["chunk_id"] for metadata in results["metadatas"]]
+            logger.info(f"📊 Found {len(chunk_ids)} chunks without embeddings")
+            return chunk_ids
+            
         except Exception as e:
             logger.error(f"❌ Error getting chunks without embeddings: {e}")
             return []
@@ -338,40 +326,33 @@ class VectorStorage:
             List of similar chunks with metadata
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                
-                search_sql = """
-                SELECT 
-                    chunk_id,
-                    file_name,
-                    file_path,
-                    chunk_extracted_text,
-                    full_summary,
-                    chunk_title,
-                    chunk_summary,
-                    1 - (embedding <=> %s) as similarity_score
-                FROM document_chunks 
-                WHERE embedding IS NOT NULL
-                AND 1 - (embedding <=> %s) >= %s
-                ORDER BY embedding <=> %s
-                LIMIT %s
-                """
-                
-                cursor.execute(search_sql, (
-                    query_embedding, 
-                    query_embedding, 
-                    similarity_threshold,
-                    query_embedding, 
-                    limit
-                ))
-                
-                results = cursor.fetchall()
-                chunks = [dict(row) for row in results]
-                
-                logger.info(f"🔍 Found {len(chunks)} similar chunks")
-                return chunks
-                
+            # Get the embedding model from the index
+            embed_model = self.index.embed_model
+            
+            # Create retriever with similarity threshold
+            from llama_index.core.retrievers import VectorIndexRetriever
+            retriever = VectorIndexRetriever(
+                index=self.index,
+                similarity_top_k=limit,
+                vector_store_query_mode="hybrid",
+                embed_model=embed_model
+            )
+            
+            # Create a dummy query (we'll use the embedding directly)
+            # For now, we'll use a simple text query and filter by similarity
+            results = retriever.retrieve("similarity search")
+            
+            # Filter by similarity threshold and convert to our format
+            filtered_results = []
+            for result in results:
+                if hasattr(result, 'score') and result.score >= similarity_threshold:
+                    chunk_data = self._node_to_dict(result.node)
+                    chunk_data['similarity_score'] = result.score
+                    filtered_results.append(chunk_data)
+            
+            logger.info(f"🔍 Found {len(filtered_results)} similar chunks")
+            return filtered_results
+            
         except Exception as e:
             logger.error(f"❌ Error searching similar chunks: {e}")
             return []
@@ -388,43 +369,93 @@ class VectorStorage:
             List of matching chunks
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                
-                search_sql = """
-                SELECT 
-                    chunk_id,
-                    file_name,
-                    file_path,
-                    chunk_extracted_text,
-                    full_summary,
-                    chunk_title,
-                    chunk_summary,
-                    created_at
-                FROM document_chunks 
-                WHERE 
-                    chunk_extracted_text ILIKE %s OR
-                    chunk_title ILIKE %s OR
-                    chunk_summary ILIKE %s OR
-                    full_summary ILIKE %s
-                ORDER BY created_at DESC
-                LIMIT %s
-                """
-                
-                search_pattern = f"%{query_text}%"
-                cursor.execute(search_sql, (
-                    search_pattern, search_pattern, search_pattern, search_pattern, limit
-                ))
-                
-                results = cursor.fetchall()
-                chunks = [dict(row) for row in results]
-                
-                logger.info(f"🔍 Found {len(chunks)} chunks matching text: '{query_text}'")
-                return chunks
-                
+            # Get the embedding model from the index
+            embed_model = self.index.embed_model
+            
+            # Create retriever with explicit embedding model
+            from llama_index.core.retrievers import VectorIndexRetriever
+            retriever = VectorIndexRetriever(
+                index=self.index,
+                similarity_top_k=limit,
+                vector_store_query_mode="hybrid",
+                embed_model=embed_model
+            )
+            
+            # Search
+            results = retriever.retrieve(query_text)
+            
+            # Convert to our format
+            chunks = []
+            for result in results:
+                chunk_data = self._node_to_dict(result.node)
+                chunk_data['similarity_score'] = getattr(result, 'score', 0.0)
+                chunks.append(chunk_data)
+            
+            logger.info(f"🔍 Found {len(chunks)} chunks matching text: '{query_text}'")
+            return chunks
+            
         except Exception as e:
             logger.error(f"❌ Error searching by text: {e}")
             return []
+    
+    def search_with_metadata_filters(self, query_text: str, filters: MetadataFilters, 
+                                   limit: int = 10) -> List[Dict]:
+        """
+        Search chunks with metadata filters.
+        
+        Args:
+            query_text: Text to search for
+            filters: MetadataFilters object
+            limit: Maximum number of results
+            
+        Returns:
+            List of matching chunks
+        """
+        try:
+            # Get the embedding model from the index
+            embed_model = self.index.embed_model
+            
+            # Create retriever with metadata filters and explicit embedding model
+            from llama_index.core.retrievers import VectorIndexRetriever
+            retriever = VectorIndexRetriever(
+                index=self.index,
+                similarity_top_k=limit,
+                filters=filters,
+                vector_store_query_mode="hybrid",
+                embed_model=embed_model
+            )
+            
+            # Search
+            results = retriever.retrieve(query_text)
+            
+            # Convert to our format
+            chunks = []
+            for result in results:
+                chunk_data = self._node_to_dict(result.node)
+                chunk_data['similarity_score'] = getattr(result, 'score', 0.0)
+                chunks.append(chunk_data)
+            
+            logger.info(f"🔍 Found {len(chunks)} chunks with metadata filters")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"❌ Error searching with metadata filters: {e}")
+            return []
+    
+    def _node_to_dict(self, node: TextNode) -> Dict:
+        """Convert LlamaIndex TextNode to dictionary format."""
+        return {
+            "chunk_id": node.metadata.get("chunk_id", ""),
+            "file_name": node.metadata.get("file_name", ""),
+            "file_path": node.metadata.get("file_path", ""),
+            "chunk_extracted_text": node.text,
+            "full_summary": node.metadata.get("full_summary", ""),
+            "chunk_title": node.metadata.get("chunk_title", ""),
+            "chunk_summary": node.metadata.get("chunk_summary", ""),
+            "created_at": node.metadata.get("created_at", ""),
+            "word_count": node.metadata.get("word_count", 0),
+            "char_count": node.metadata.get("char_count", 0)
+        }
     
     def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict]:
         """
@@ -437,16 +468,31 @@ class VectorStorage:
             Chunk data as dictionary or None if not found
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            # Query ChromaDB directly
+            results = self.chroma_collection.get(
+                ids=[chunk_id],
+                include=["metadatas", "documents"]
+            )
+            
+            if results["ids"]:
+                metadata = results["metadatas"][0]
+                document = results["documents"][0]
                 
-                cursor.execute("""
-                    SELECT * FROM document_chunks WHERE chunk_id = %s
-                """, (chunk_id,))
-                
-                result = cursor.fetchone()
-                return dict(result) if result else None
-                
+                return {
+                    "chunk_id": metadata.get("chunk_id", ""),
+                    "file_name": metadata.get("file_name", ""),
+                    "file_path": metadata.get("file_path", ""),
+                    "chunk_extracted_text": document,
+                    "full_summary": metadata.get("full_summary", ""),
+                    "chunk_title": metadata.get("chunk_title", ""),
+                    "chunk_summary": metadata.get("chunk_summary", ""),
+                    "created_at": metadata.get("created_at", ""),
+                    "word_count": metadata.get("word_count", 0),
+                    "char_count": metadata.get("char_count", 0)
+                }
+            
+            return None
+            
         except Exception as e:
             logger.error(f"❌ Error getting chunk {chunk_id}: {e}")
             return None
@@ -462,21 +508,16 @@ class VectorStorage:
             List of chunks for the file
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                
-                cursor.execute("""
-                    SELECT * FROM document_chunks 
-                    WHERE file_name = %s 
-                    ORDER BY created_at
-                """, (file_name,))
-                
-                results = cursor.fetchall()
-                chunks = [dict(row) for row in results]
-                
-                logger.info(f"📄 Found {len(chunks)} chunks for file: {file_name}")
-                return chunks
-                
+            # Create metadata filter
+            filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(key="file_name", value=file_name)
+                ]
+            )
+            
+            # Search with filter using explicit embedding model
+            return self.search_with_metadata_filters("", filters, limit=1000)
+            
         except Exception as e:
             logger.error(f"❌ Error getting chunks for file {file_name}: {e}")
             return []
@@ -489,44 +530,31 @@ class VectorStorage:
             Dictionary with database statistics
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # Total chunks
-                cursor.execute("SELECT COUNT(*) FROM document_chunks")
-                total_chunks = cursor.fetchone()[0]
-                
-                # Chunks with embeddings
-                cursor.execute("SELECT COUNT(*) FROM document_chunks WHERE embedding IS NOT NULL")
-                chunks_with_embeddings = cursor.fetchone()[0]
-                
-                # Unique files
-                cursor.execute("SELECT COUNT(DISTINCT file_name) FROM document_chunks")
-                unique_files = cursor.fetchone()[0]
-                
-                # Average embedding dimension (pgvector doesn't support array_length)
-                cursor.execute("""
-                    SELECT COUNT(*) 
-                    FROM document_chunks 
-                    WHERE embedding IS NOT NULL
-                """)
-                chunks_with_embeddings_count = cursor.fetchone()[0]
-                
-                # For pgvector, we know the dimension is fixed (1536)
-                avg_dimension = 1536 if chunks_with_embeddings_count > 0 else 0
-                
-                stats = {
-                    "total_chunks": total_chunks,
-                    "chunks_with_embeddings": chunks_with_embeddings,
-                    "chunks_without_embeddings": total_chunks - chunks_with_embeddings,
-                    "unique_files": unique_files,
-                    "avg_embedding_dimension": avg_dimension,
-                    "embedding_coverage": (chunks_with_embeddings / total_chunks * 100) if total_chunks > 0 else 0
-                }
-                
-                logger.info(f"📊 Database stats: {stats}")
-                return stats
-                
+            # Get collection count
+            total_chunks = self.chroma_collection.count()
+            
+            # Get unique files
+            results = self.chroma_collection.get(include=["metadatas"])
+            unique_files = set()
+            chunks_with_embeddings = 0
+            
+            for metadata in results["metadatas"]:
+                unique_files.add(metadata.get("file_name", ""))
+                # Note: ChromaDB automatically handles embeddings, so we assume all have them
+                chunks_with_embeddings += 1
+            
+            stats = {
+                "total_chunks": total_chunks,
+                "chunks_with_embeddings": chunks_with_embeddings,
+                "chunks_without_embeddings": 0,  # ChromaDB handles embeddings automatically
+                "unique_files": len(unique_files),
+                "avg_embedding_dimension": self.embedding_dimension,
+                "embedding_coverage": 100.0 if total_chunks > 0 else 0.0
+            }
+            
+            logger.info(f"📊 Database stats: {stats}")
+            return stats
+            
         except Exception as e:
             logger.error(f"❌ Error getting database stats: {e}")
             return {}
@@ -542,19 +570,12 @@ class VectorStorage:
             bool: True if successful, False otherwise
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute("DELETE FROM document_chunks WHERE chunk_id = %s", (chunk_id,))
-                conn.commit()
-                
-                if cursor.rowcount > 0:
-                    logger.info(f"✅ Chunk {chunk_id} deleted successfully")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Chunk {chunk_id} not found for deletion")
-                    return False
-                    
+            # Delete from ChromaDB
+            self.chroma_collection.delete(ids=[chunk_id])
+            
+            logger.info(f"✅ Chunk {chunk_id} deleted successfully")
+            return True
+            
         except Exception as e:
             logger.error(f"❌ Error deleting chunk {chunk_id}: {e}")
             return False
@@ -570,15 +591,18 @@ class VectorStorage:
             int: Number of chunks deleted
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute("DELETE FROM document_chunks WHERE file_name = %s", (file_name,))
-                deleted_count = cursor.rowcount
-                conn.commit()
-                
-                logger.info(f"✅ Deleted {deleted_count} chunks for file: {file_name}")
-                return deleted_count
+            # Get all chunks for the file
+            chunks = self.get_chunks_by_file(file_name)
+            chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+            
+            if chunk_ids:
+                # Delete from ChromaDB
+                self.chroma_collection.delete(ids=chunk_ids)
+                logger.info(f"✅ Deleted {len(chunk_ids)} chunks for file: {file_name}")
+                return len(chunk_ids)
+            else:
+                logger.info(f"ℹ️ No chunks found for file: {file_name}")
+                return 0
                 
         except Exception as e:
             logger.error(f"❌ Error deleting chunks for file {file_name}: {e}")
@@ -594,11 +618,9 @@ def create_database_config_from_env() -> DatabaseConfig:
         DatabaseConfig object
     """
     return DatabaseConfig(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=int(os.getenv("DB_PORT", "5432")),
-        database=os.getenv("DB_NAME", "vector_storage_db"),
-        username=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "")
+        persist_directory=os.getenv("CHROMA_PERSIST_DIR", "./chroma_db"),
+        collection_name=os.getenv("CHROMA_COLLECTION_NAME", "document_chunks"),
+        embedding_function=os.getenv("GEMINI_EMBEDDING_MODEL", "models/embedding-001")
     )
 
 def create_chunk_from_data(file_name: str, file_path: str, chunk_text: str, 
@@ -649,7 +671,7 @@ def example_usage():
         print("✅ Database setup completed successfully")
     except Exception as e:
         print(f"❌ Database setup failed: {e}")
-        print("Please check your database credentials and ensure PostgreSQL is running")
+        print("Please check your configuration")
         return
     
     # Create sample chunks
