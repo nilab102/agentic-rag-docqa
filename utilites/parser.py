@@ -339,14 +339,14 @@ class SmartDocumentProcessor:
             4. For complete pages: [PAGE_START] at page beginning, [PAGE_END] at page end
             5. Page markers should be on their own lines for clarity
             
-            📄 PAGE MARKER EXAMPLES:
-            [PAGE_START]
-            Page content here...
-            [PAGE_END]
-            
-            [PAGE_START]
-            Another page content...
-            [PAGE_END]
+                    📄 PAGE MARKER EXAMPLES:
+        [PAGE_START]
+        Page content here...
+        [PAGE_END]
+        
+        [PAGE_START]
+        Another page content...
+        [PAGE_END]
             
             ⚠️  FAILURE TO MARK PAGES WILL RESULT IN INCOMPLETE DOCUMENT STRUCTURE!
             ======================================================================
@@ -427,6 +427,7 @@ class SmartDocumentProcessor:
         3. If chunk ends mid-page, use [PAGE_END] at the very end
         4. For complete pages: [PAGE_START] at page beginning, [PAGE_END] at page end
         5. Page markers should be on their own lines for clarity
+        NOTE: Page numbers will be added automatically - do not add PAGE_NUMBER markers
         
         📄 PAGE MARKER EXAMPLES:
         [PAGE_START]
@@ -1012,6 +1013,52 @@ class SmartDocumentProcessor:
         return text
 
     # 3. ADD NEW FUNCTION TO VALIDATE SEMANTIC MARKERS
+    def _assign_page_numbers_manually(self, extracted_text: str, chunk_index: int, total_chunks: int) -> str:
+        """
+        Manually assign page numbers to extracted text based on chunk index.
+        This ensures sequential page numbering across all chunks.
+        
+        Args:
+            extracted_text: Text extracted from the chunk
+            chunk_index: Current chunk index (0-based)
+            total_chunks: Total number of chunks
+            
+        Returns:
+            Text with manually assigned page numbers
+        """
+        # Calculate the starting page number for this chunk
+        # Each chunk typically contains max_pages_per_chunk pages
+        starting_page = (chunk_index * self.max_pages_per_chunk) + 1
+        
+        # Count how many pages are in this chunk
+        page_starts = len(re.findall(r'\[PAGE_START\]', extracted_text))
+        
+        if page_starts == 0:
+            # No page markers found, add a single page number
+            return f"PAGE_NUMBER: {starting_page}\n{extracted_text}"
+        
+        # Split the text by page markers to process each page
+        page_parts = re.split(r'(\[PAGE_START\])', extracted_text)
+        
+        if len(page_parts) < 2:
+            # No proper page structure, add single page number
+            return f"PAGE_NUMBER: {starting_page}\n{extracted_text}"
+        
+        # Reconstruct text with page numbers
+        result_parts = []
+        current_page = starting_page
+        
+        for i, part in enumerate(page_parts):
+            if part == '[PAGE_START]':
+                # Add page number before this page start marker
+                result_parts.append(f"PAGE_NUMBER: {current_page}")
+                result_parts.append(part)
+                current_page += 1
+            else:
+                result_parts.append(part)
+        
+        return '\n'.join(result_parts)
+
     def _validate_semantic_markers(self, text: str) -> None:
         """Validate that semantic markers are properly paired."""
         
@@ -1043,8 +1090,8 @@ class SmartDocumentProcessor:
                 warnings.append(f"Unmatched {start_marker}/{end_marker}: {start_count} starts, {end_count} ends")
         
         # Special validation for page markers
-        page_start_count = len(re.findall(r'\[PAGE_START.*?\]', text))
-        page_end_count = len(re.findall(r'\[PAGE_END.*?\]', text))
+        page_start_count = len(re.findall(r'\[PAGE_START\]', text))
+        page_end_count = len(re.findall(r'\[PAGE_END\]', text))
         
         if page_start_count == 0 and page_end_count == 0:
             warnings.append("⚠️  CRITICAL: NO PAGE MARKERS FOUND! This will break document structure!")
@@ -1058,45 +1105,7 @@ class SmartDocumentProcessor:
             for warning in warnings:
                 print(f"  - {warning}")
 
-    def _add_page_numbers(self, text: str) -> str:
-        """
-        Add sequential page numbers to [PAGE_START] and [PAGE_END] markers.
-        First occurrence becomes [PAGE_START: -1], second becomes [PAGE_START: -2], etc.
-        """
-        page_counter = 1
-        
-        def replace_page_start(match):
-            nonlocal page_counter
-            replacement = f"[PAGE_START: -{page_counter}]"
-            page_counter += 1
-            return replacement
-        
-        def replace_page_end(match):
-            nonlocal page_counter
-            # Use the same counter as PAGE_START to maintain pairing
-            current_page = page_counter - 1  # Since counter was incremented in start
-            replacement = f"[PAGE_END: -{current_page}]"
-            return replacement
-        
-        # Replace all [PAGE_START] occurrences with numbered versions
-        numbered_text = re.sub(r'\[PAGE_START\]', replace_page_start, text)
-        
-        # Reset counter for PAGE_END processing
-        page_counter = 1
-        
-        # Replace all [PAGE_END] occurrences with numbered versions
-        numbered_text = re.sub(r'\[PAGE_END\]', replace_page_end, numbered_text)
-        
-        # Count total page markers for reporting
-        total_page_starts = len(re.findall(r'\[PAGE_START.*?\]', numbered_text))
-        total_page_ends = len(re.findall(r'\[PAGE_END.*?\]', numbered_text))
-        
-        print(f"✓ Added page numbers: {total_page_starts} PAGE_START markers, {total_page_ends} PAGE_END markers")
-        
-        if total_page_starts != total_page_ends:
-            print(f"⚠️  Warning: Unequal page markers - {total_page_starts} starts vs {total_page_ends} ends")
-        
-        return numbered_text
+
 
     def _validate_page_markers(self, text: str) -> Dict[str, Any]:
         """
@@ -1117,8 +1126,8 @@ class SmartDocumentProcessor:
         }
         
         # Count page markers
-        page_starts = re.findall(r'\[PAGE_START.*?\]', text)
-        page_ends = re.findall(r'\[PAGE_END.*?\]', text)
+        page_starts = re.findall(r'\[PAGE_START\]', text)
+        page_ends = re.findall(r'\[PAGE_END\]', text)
         
         validation_result['page_start_count'] = len(page_starts)
         validation_result['page_end_count'] = len(page_ends)
@@ -1166,8 +1175,8 @@ class SmartDocumentProcessor:
         Returns:
             Formatted report string
         """
-        page_starts = re.findall(r'\[PAGE_START.*?\]', text)
-        page_ends = re.findall(r'\[PAGE_END.*?\]', text)
+        page_starts = re.findall(r'\[PAGE_START\]', text)
+        page_ends = re.findall(r'\[PAGE_END\]', text)
         
         report = f"""
 📄 PAGE MARKER ANALYSIS REPORT
@@ -1283,8 +1292,8 @@ Page marker distribution:
                     )
                     
                     # Check if page markers are present
-                    page_starts = len(re.findall(r'\[PAGE_START.*?\]', extracted_text))
-                    page_ends = len(re.findall(r'\[PAGE_END.*?\]', extracted_text))
+                    page_starts = len(re.findall(r'\[PAGE_START\]', extracted_text))
+                    page_ends = len(re.findall(r'\[PAGE_END\]', extracted_text))
                     
                     if page_starts > 0 or page_ends > 0:
                         print(f"✓ Chunk {i+1} processed with page markers ({len(extracted_text)} characters)")
@@ -1301,6 +1310,9 @@ Page marker distribution:
                     if retry_count > max_retries:
                         raise
                     retry_count += 1
+            
+            # Manually assign page numbers to ensure sequential numbering
+            extracted_text = self._assign_page_numbers_manually(extracted_text, i, len(chunks))
             
             extracted_texts.append(extracted_text)
             boundaries.append(boundary)
@@ -1324,11 +1336,7 @@ Page marker distribution:
         print("Merging chunks using intelligent boundary analysis...")
         final_text = self._smart_merge_chunks(extracted_texts, merge_decisions)
         
-        # STEP 3: Add page numbers to final text
-        print("Adding sequential page numbers...")
-        final_text = self._add_page_numbers(final_text)
-        
-        # STEP 4: Validate page markers
+        # STEP 3: Validate page markers (no page numbering added)
         print("Validating page markers...")
         page_validation = self._validate_page_markers(final_text)
         
@@ -1489,8 +1497,8 @@ Page marker distribution:
         return {
             'validation': validation,
             'report': report,
-            'page_starts': re.findall(r'\[PAGE_START.*?\]', text),
-            'page_ends': re.findall(r'\[PAGE_END.*?\]', text),
+            'page_starts': re.findall(r'\[PAGE_START\]', text),
+            'page_ends': re.findall(r'\[PAGE_END\]', text),
             'total_characters': len(text),
             'has_page_markers': validation['has_page_markers'],
             'is_valid': validation['is_valid']
