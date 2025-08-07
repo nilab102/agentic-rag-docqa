@@ -6,6 +6,7 @@ import shutil
 import uuid
 import threading
 import time
+import re
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 from datetime import datetime
@@ -91,7 +92,6 @@ class QueryRequest(BaseModel):
     query: str = Field(..., description="The search query")
     limit: int = Field(10, description="Maximum number of results")
     use_rag: bool = Field(True, description="Whether to use RAG for response generation")
-    file_filter: Optional[str] = Field(None, description="Filter results by specific filename")
 
 class QueryResponse(BaseModel):
     success: bool
@@ -122,6 +122,23 @@ class TaskListResponse(BaseModel):
     tasks: List[TaskInfo]
     total_tasks: int
     timestamp: str
+
+def clean_filename(filename: str) -> str:
+    """
+    Remove UUID prefix from filename.
+    Handles patterns like: 02c2a7f6-e24d-47eb-a94b-67060bb31261_originalname.pdf
+    Returns: originalname.pdf
+    """
+    if not filename:
+        return filename
+    
+    # Pattern to match UUID prefix: 8-4-4-4-12 hexadecimal characters followed by underscore
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_'
+    
+    # Remove UUID prefix if present
+    cleaned = re.sub(uuid_pattern, '', filename, flags=re.IGNORECASE)
+    
+    return cleaned
 
 async def initialize_services():
     """Initialize vector storage, query engine, and processing pipeline."""
@@ -489,28 +506,28 @@ async def query_documents(request: QueryRequest):
         if not query_engine:
             raise HTTPException(status_code=503, detail="Query engine not initialized")
         
-        # Perform query based on parameters
-        if request.file_filter:
-            # Search in specific file
-            query_result = query_engine.search_by_file(
-                request.query, 
-                request.file_filter, 
-                request.limit
-            )
+        # Perform query - removed file_filter logic
+        if request.use_rag:
+            query_result = query_engine.rag_query(request.query, request.limit)
         else:
-            # General search
-            if request.use_rag:
-                query_result = query_engine.rag_query(request.query, request.limit)
-            else:
-                query_result = query_engine.search_semantic(request.query, request.limit)
+            query_result = query_engine.search_semantic(request.query, request.limit)
         
-        # Extract unique file names from results
-        file_names = list(set(result.get('file_name', '') for result in query_result.results))
-        file_names = [name for name in file_names if name]  # Remove empty names
+        # Extract unique file names from results and clean them
+        raw_file_names = list(set(result.get('file_name', '') for result in query_result.results))
+        raw_file_names = [name for name in raw_file_names if name]  # Remove empty names
+        
+        # Clean the filenames by removing UUID prefixes
+        clean_file_names = [clean_filename(filename) for filename in raw_file_names]
+        # Remove duplicates that might result from cleaning
+        clean_file_names = list(set(clean_file_names))
+        # Remove any empty strings that might result from cleaning
+        clean_file_names = [name for name in clean_file_names if name]
+        
+        logger.info(f"🔍 Query: '{request.query}' - Found files: {clean_file_names}")
         
         return QueryResponse(
             success=True,
-            file_names=file_names,
+            file_names=clean_file_names,
             rag_response=query_result.rag_response,
             timestamp=datetime.now().isoformat()
         )
@@ -531,15 +548,18 @@ async def list_files():
         # Get all files from database
         files = query_engine.list_files()
         
-        # Get file information
+        # Get file information and clean filenames
         file_infos = []
         for filename in files:
             chunks = vector_storage.get_chunks_by_file(filename)
-            file_infos.append(FileInfo(
-                filename=filename,
-                chunks_count=len(chunks),
-                uploaded_at=chunks[0].get("created_at", "Unknown") if chunks else "Unknown"
-            ))
+            # Clean the filename for display
+            clean_name = clean_filename(filename)
+            if clean_name:  # Only add if cleaning resulted in a valid name
+                file_infos.append(FileInfo(
+                    filename=clean_name,
+                    chunks_count=len(chunks),
+                    uploaded_at=chunks[0].get("created_at", "Unknown") if chunks else "Unknown"
+                ))
         
         return FilesResponse(
             success=True,
@@ -556,13 +576,27 @@ async def list_files():
 async def delete_file(filename: str):
     """
     Delete a specific file and all its chunks from the database.
+    Note: This endpoint expects the clean filename (without UUID prefix)
     """
     try:
         if not vector_storage:
             raise HTTPException(status_code=503, detail="Vector storage not initialized")
         
-        # Delete all chunks for the file
-        deleted_count = vector_storage.delete_file_chunks(filename)
+        # Get all files to find the matching one (including UUID prefix)
+        all_files = query_engine.list_files()
+        matching_file = None
+        
+        # Look for a file whose cleaned name matches the requested filename
+        for stored_filename in all_files:
+            if clean_filename(stored_filename) == filename:
+                matching_file = stored_filename
+                break
+        
+        if not matching_file:
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+        
+        # Delete all chunks for the file using the actual stored filename
+        deleted_count = vector_storage.delete_file_chunks(matching_file)
         
         if deleted_count > 0:
             return {
@@ -572,7 +606,7 @@ async def delete_file(filename: str):
                 "timestamp": datetime.now().isoformat()
             }
         else:
-            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+            raise HTTPException(status_code=404, detail=f"No chunks found for file: {filename}")
             
     except HTTPException:
         raise
