@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Unified Server for Agentic RAG Document Q&A
+Combines FastAPI backend with static file serving on a single port
+"""
+
 import os
 import asyncio
 import logging
@@ -14,8 +20,9 @@ from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -303,7 +310,28 @@ async def startup_event():
     """Initialize services on startup."""
     await initialize_services()
 
-@app.get("/", response_model=Dict[str, str])
+# Serve static files (if any CSS, JS, images are added later)
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    """Serve the main HTML page."""
+    try:
+        # Read the index.html file
+        with open("index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        
+        # Update the API_BASE to use relative paths since we're serving from the same origin
+        html_content = html_content.replace('const API_BASE = \'http://localhost:8000\';', 'const API_BASE = \'\';')
+        
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="index.html not found")
+    except Exception as e:
+        logger.error(f"Error serving index.html: {e}")
+        raise HTTPException(status_code=500, detail="Error serving index.html")
+
+@app.get("/api", response_model=Dict[str, str])
 async def root():
     """Root endpoint with API information."""
     return {
@@ -614,11 +642,23 @@ async def delete_file(filename: str):
         logger.error(f"Failed to delete file {filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
 
-if __name__ == "__main__":
+def main():
+    """Main function to run the unified server."""
+    port = int(os.environ.get("UI_PORT", 8000))
+    
+    print(f"🚀 Starting Unified Agentic RAG Document Q&A Server")
+    print(f"📁 Serving API and UI on port: {port}")
+    print(f"🌐 Access the application at: http://localhost:{port}")
+    print(f"📚 API documentation at: http://localhost:{port}/docs")
+    print(f"✅ Press Ctrl+C to stop the server")
+    
     uvicorn.run(
-        "main:app",
+        "unified_server:app",
         host="0.0.0.0",
-        port=int(os.environ.get("UI_PORT", 8000)),
+        port=port,
         reload=True,
         log_level="info"
     )
+
+if __name__ == "__main__":
+    main() 
