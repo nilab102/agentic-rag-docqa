@@ -653,7 +653,7 @@ def main():
     print(f"✅ Press Ctrl+C to stop the server")
     
     uvicorn.run(
-        "unified_server:app",
+        "start:app",
         host="0.0.0.0",
         port=port,
         reload=True,
