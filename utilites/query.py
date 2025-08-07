@@ -74,8 +74,8 @@ def get_language_specific_prompt(language: str) -> str:
 تعليمات اللغة العربية:
 - استجب باللغة العربية إذا كان السؤال باللغة العربية
 - استخدم قواعد اللغة العربية الصحيحة والتنسيق المناسب
-- استخدم التنسيق التالي للمراجع: "(الصفحة: X)" أو "(الصفحات: X, Y, Z)"
-- إذا لم تتوفر أرقام الصفحات، اذكر "(الصفحة: غير محدد)"
+- في نهاية الإجابة، اذكر أرقام الصفحات بالتنسيق التالي: pages[1,2,3...]
+- إذا لم تتوفر أرقام الصفحات، اذكر pages[غير محدد]
 - حافظ على نفس أسلوب اللغة ونبرة السؤال
 """
     elif language == 'en':
@@ -83,8 +83,8 @@ def get_language_specific_prompt(language: str) -> str:
 English Language Instructions:
 - Respond in English if the question is in English
 - Use proper English grammar and formatting
-- Use this format for citations: "(Page: X)" or "(Pages: X, Y, Z)"
-- If page numbers are not available, mention "(Page: Not specified)"
+- At the end of your answer, mention page numbers in this format: pages[1,2,3...]
+- If page numbers are not available, mention pages[not specified]
 - Maintain the same language style and tone as the query
 """
     else:
@@ -92,7 +92,7 @@ English Language Instructions:
 Language Instructions:
 - Respond in the same language as the user's query
 - Use proper grammar and formatting for that language
-- Use appropriate translation for page citations
+- At the end of your answer, mention page numbers in this format: pages[1,2,3...]
 - If page numbers are not available, use appropriate translation
 - Maintain the same language style and tone as the query
 """
@@ -112,14 +112,8 @@ LANGUAGE INSTRUCTIONS:
 IMPORTANT INSTRUCTIONS:
 1. Base your answer ONLY on the information provided in the context documents
 2. At the end of your response, ALWAYS mention the page numbers where the information was found
-3. Use this format for page citations:
-   - English: "(Page: X)" or "(Pages: X, Y, Z)" where X, Y, Z are page numbers
-   - Arabic: "(الصفحة: X)" or "(الصفحات: X, Y, Z)" where X, Y, Z are page numbers
-   - Other languages: Use appropriate translation of "Page" or "Pages"
-4. If page numbers are not available for some chunks, mention:
-   - English: "(Page: Not specified)"
-   - Arabic: "(الصفحة: غير محدد)"
-   - Other languages: Use appropriate translation
+3. Use this format for page citations: pages[1,2,3...] where numbers are the page numbers
+4. If page numbers are not available for some chunks, mention pages[not specified]
 5. If you cannot find relevant information in the context, say so clearly in the same language as the query
 6. Be concise but comprehensive in your response
 7. Maintain the same language style and tone as the user's query
@@ -291,16 +285,37 @@ Content: {node.node.text}
         """
         cited_pages = []
         
-        # Extract page numbers from retrieved nodes
-        for node in retrieved_nodes:
-            page_num = node.node.metadata.get("page_number")
-            if page_num is not None and isinstance(page_num, (int, str)):
-                try:
-                    page_int = int(page_num)
-                    if page_int not in cited_pages:
-                        cited_pages.append(page_int)
-                except (ValueError, TypeError):
-                    continue
+        # First, try to extract page numbers from the new format: pages[1,2,3...]
+        import re
+        pages_pattern = r'pages\[([^\]]+)\]'
+        pages_match = re.search(pages_pattern, rag_response, re.IGNORECASE)
+        
+        if pages_match:
+            pages_str = pages_match.group(1)
+            # Handle different formats: "1,2,3", "1, 2, 3", "1 2 3", etc.
+            pages_str = re.sub(r'\s+', '', pages_str)  # Remove whitespace
+            page_numbers = re.split(r'[,،]', pages_str)  # Split by comma (English and Arabic)
+            
+            for page_str in page_numbers:
+                if page_str.strip() and page_str.lower() not in ['not specified', 'غير محدد', 'notspecified']:
+                    try:
+                        page_int = int(page_str.strip())
+                        if page_int not in cited_pages:
+                            cited_pages.append(page_int)
+                    except (ValueError, TypeError):
+                        continue
+        
+        # If no pages found in the new format, fall back to extracting from retrieved nodes
+        if not cited_pages:
+            for node in retrieved_nodes:
+                page_num = node.node.metadata.get("page_number")
+                if page_num is not None and isinstance(page_num, (int, str)):
+                    try:
+                        page_int = int(page_num)
+                        if page_int not in cited_pages:
+                            cited_pages.append(page_int)
+                    except (ValueError, TypeError):
+                        continue
         
         return sorted(cited_pages)
     
@@ -563,8 +578,8 @@ Your task is to provide accurate and helpful responses while citing the page num
 IMPORTANT INSTRUCTIONS:
 1. Base your answer ONLY on the information provided in the context documents
 2. At the end of your response, ALWAYS mention the page numbers where the information was found
-3. Use appropriate page citation format for the detected language
-4. If page numbers are not available for some chunks, mention appropriate translation
+3. Use this format for page citations: pages[1,2,3...] where numbers are the page numbers
+4. If page numbers are not available for some chunks, mention pages[not specified]
 5. If you cannot find relevant information in the context, say so clearly in the same language as the query
 6. Be concise but comprehensive in your response
 7. Maintain the same language style and tone as the user's query
@@ -672,8 +687,8 @@ Your task is to provide accurate and helpful responses while citing the page num
 IMPORTANT INSTRUCTIONS:
 1. Base your answer ONLY on the information provided in the context documents
 2. At the end of your response, ALWAYS mention the page numbers where the information was found
-3. Use appropriate page citation format for the detected language
-4. If page numbers are not available for some chunks, mention appropriate translation
+3. Use this format for page citations: pages[1,2,3...] where numbers are the page numbers
+4. If page numbers are not available for some chunks, mention pages[not specified]
 5. If you cannot find relevant information in the context, say so clearly in the same language as the query
 6. Be concise but comprehensive in your response
 7. Maintain the same language style and tone as the user's query
