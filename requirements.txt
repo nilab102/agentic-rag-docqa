@@ -274,6 +274,18 @@ google-genai
 PyPDF2
 scikit-learn
 python-multipart
+
+llama-index-llms-gemini
+
 #pip install --upgrade google-generativeai
 #pip install -U llama-index --upgrade --no-cache-dir --force-reinstall
 
+llama-index-embeddings-gemini
+llama-index
+
+# LlamaIndex and ChromaDB dependencies
+llama-index
+llama-index-vector-stores-chroma
+llama-index-embeddings-google-genai
+llama-index-llms-google-genai
+chromadb
