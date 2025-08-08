@@ -30,9 +30,10 @@ def main():
         return
     
     # Create server
-    with socketserver.TCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
+    with socketserver.TCPServer(("0.0.0.0", PORT), MyHTTPRequestHandler) as httpd:
         print(f"🚀 UI Server started at http://localhost:{PORT}")
         print(f"📁 Serving files from: {script_dir}")
+        print(f"🔗 API Backend should be running at http://localhost:8001")
         print(f"🌐 Opening browser automatically...")
         
         # Open browser
