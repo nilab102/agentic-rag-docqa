@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  agentic-rag-docqa:
+    build: .
+    container_name: agentic-rag-docqa
+    ports:
+      - "1090:1090"
+    environment:
+      # Google API Keys (set these in your .env file)
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_GEMINI_MODEL=${GOOGLE_GEMINI_MODEL:-gemini-2.5-flash}
+      - google_gemini_name_light=${google_gemini_name_light:-gemini-2.5-flash}
+      - google_gemini_embedding_name=${google_gemini_embedding_name:-models/gemini-embedding-exp-03-07}
+      
+      # Third-party Converter API
+      - converter_api_key=${converter_api_key}
+      
+      # Chroma Vector Store
+      - CHROMA_PERSIST_DIR=./chroma_db
+      
+      # Gemini Models
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-models/embedding-001}
+      - GEMINI_LLM_MODEL=${GEMINI_LLM_MODEL:-gemini-2.5-flash}
+      
+      # Embedding & Similarity Settings
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1536}
+      - SIMILARITY_TOP_K=${SIMILARITY_TOP_K:-10}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.7}
+      
+      # LLM Output Settings
+      - RESPONSE_MODE=${RESPONSE_MODE:-compact}
+      - TEMPERATURE=${TEMPERATURE:-0.1}
+      - MAX_TOKENS=${MAX_TOKENS:-2048}
+      
+      # Server Settings
+      - API_PORT=1090
+    volumes:
+      # Persist uploaded files
+      - ./uploads:/app/uploads
+      # Persist vector database
+      - ./chroma_db:/app/chroma_db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  default:
+    name: agentic-rag-network 
