@@ -9,7 +9,7 @@ import webbrowser
 import os
 from pathlib import Path
 
-PORT = int(os.environ.get("UI_PORT", 8000))
+PORT = int(os.environ.get("UI_PORT", 1090))
 
 class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
@@ -33,7 +33,7 @@ def main():
     with socketserver.TCPServer(("0.0.0.0", PORT), MyHTTPRequestHandler) as httpd:
         print(f"🚀 UI Server started at http://localhost:{PORT}")
         print(f"📁 Serving files from: {script_dir}")
-        print(f"🔗 API Backend should be running at http://localhost:8001")
+        print(f"🔗 API Backend should be running at http://localhost:1234")
         print(f"🌐 Opening browser automatically...")
         
         # Open browser
