@@ -484,7 +484,7 @@
     </div>
 
     <script>
-        const API_BASE = 'http://localhost:1234';
+        const API_BASE = window.location.origin;
         let currentTasks = new Set();
         let taskPollingIntervals = new Map();
 
