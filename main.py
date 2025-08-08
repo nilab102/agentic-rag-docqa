@@ -14,8 +14,9 @@ from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -303,9 +304,30 @@ async def startup_event():
     """Initialize services on startup."""
     await initialize_services()
 
-@app.get("/", response_model=Dict[str, str])
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint with API information."""
+    """Serve the main HTML UI."""
+    try:
+        with open("index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="""
+            <html>
+                <head><title>Error</title></head>
+                <body>
+                    <h1>Error: index.html not found</h1>
+                    <p>Please make sure index.html is in the same directory as main.py</p>
+                </body>
+            </html>
+            """,
+            status_code=404
+        )
+
+@app.get("/api", response_model=Dict[str, str])
+async def api_info():
+    """API information endpoint."""
     return {
         "message": "Agentic RAG Document Q&A API",
         "version": "1.0.0",
@@ -612,12 +634,19 @@ async def delete_file(filename: str):
         raise
     except Exception as e:
         logger.error(f"Failed to delete file {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+        
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.environ.get("API_PORT", 8001)),
-        log_level="info"
-    )
+        port=int(os.environ.get("API_PORT", 1090)),
+        log_level="info",
+        ssl_certfile="cert.pem", ssl_keyfile="key.pem")
