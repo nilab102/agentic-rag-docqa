@@ -6,4 +6,3 @@ utilites/__pycache__/
 utilites/*/__pycache__/
 # End Generation Here
 *.pdf
-chroma_db
